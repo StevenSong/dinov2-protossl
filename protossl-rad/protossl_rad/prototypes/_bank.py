@@ -99,16 +99,40 @@ class PrototypeBank(nn.Module):
         worst = dist.flatten(1).max(dim=-1).values
         return F.relu(worst - margin).sum()
 
+    @torch.no_grad()
+    def _other_prototype_cosines(self, flat: torch.Tensor) -> torch.Tensor:
+        # (P * K, P * K) cosines between subprototypes, -2 (below any cosine) for pairs within the same prototype
+        dots = flat @ flat.T
+        owner = torch.arange(self.n_prototypes, device=flat.device).repeat_interleave(self.n_subprototypes)
+        return dots.masked_fill_(owner[:, None] == owner[None], -2.0)
+
     def koleo_loss(self, eps: float = 1e-8) -> torch.Tensor:
         """
         KoLeo (Sablayrolles et al. 2018) over all P * K subprototypes, where each one's nearest neighbor is searched
         only among other prototypes' subprototypes, so it doesn't fight the coherence loss
         """
         flat = F.normalize(self.prototypes.float(), dim=-1).flatten(0, 1)  # (P * K, D)
-        with torch.no_grad():
-            dots = flat @ flat.T
-            owner = torch.arange(self.n_prototypes, device=flat.device).repeat_interleave(self.n_subprototypes)
-            dots.masked_fill_(owner[:, None] == owner[None], -2.0)
-            nearest = dots.argmax(dim=-1)
+        nearest = self._other_prototype_cosines(flat).argmax(dim=-1)
         distances = F.pairwise_distance(flat, flat[nearest], p=2, eps=eps)
         return -torch.log(distances + eps).mean()
+
+    @torch.no_grad()
+    def statistics(self) -> dict[str, torch.Tensor]:
+        """
+        collapse diagnostics, all means: raw subprototype norm (weight decay acts on the raw parameter, so a shrinking
+        norm raises the effective lr), worst cosine distance between a prototype's own subprototypes (the unhinged
+        coherence term), cosine between a prototype's own subprototypes (-> 1 as they collapse into one) and cosine to
+        the nearest subprototype of another prototype (-> 1 as prototypes collapse onto each other)
+        """
+        raw = self.prototypes.float()
+        protos = F.normalize(raw, dim=-1)
+        within = protos @ protos.transpose(1, 2)  # (P, K, K)
+        stats = {
+            "norm": raw.norm(dim=-1).mean(),
+            "worst_within_dist": (1 - within).flatten(1).max(dim=-1).values.mean(),
+            "nearest_other_cos": self._other_prototype_cosines(protos.flatten(0, 1)).max(dim=-1).values.mean(),
+        }
+        if self.n_subprototypes > 1:  # no pairs otherwise, and a NaN would trip the trainer's NaN check
+            off_diagonal = ~torch.eye(self.n_subprototypes, dtype=torch.bool, device=raw.device)
+            stats["within_cos"] = within[:, off_diagonal].mean()
+        return stats

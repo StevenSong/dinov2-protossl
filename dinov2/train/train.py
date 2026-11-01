@@ -290,7 +290,7 @@ def do_train(cfg, model, resume=False):
         if math.isnan(sum(loss_dict_reduced.values())):
             logger.info("NaN detected")
             raise AssertionError
-        losses_reduced = sum(loss for loss in loss_dict_reduced.values())
+        losses_reduced = sum(loss for k, loss in loss_dict_reduced.items() if not k.startswith("diag_"))
 
         metric_logger.update(lr=lr)
         metric_logger.update(wd=wd)

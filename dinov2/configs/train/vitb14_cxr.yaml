@@ -1,0 +1,41 @@
+# ProtoSSL on chest X-rays: RAD-DINO's vitb14_cxr.yaml (microsoft/rad-dino) translated to this repo's keys, with the
+# prototype head. required on the command line (the placeholder fails loudly if not overridden):
+#   train.dataset_path=CXRPretrain:split=train:mimic-cxr=<root>:chexpertplus=<root>:rexgradient=<root>
+#   student.pretrained_weights=<path to dinov2_vitb14_pretrain.pth>  (RAD-DINO's `pretrained: true`, ignored here)
+proto:
+  enabled: true
+dino:
+  koleo_loss_weight: 0  # replaced by the prototype KoLeo (proto.koleo_loss_weight)
+train:
+  # RAD-DINO: 40 per GPU on 16 GPUs. 80 x 8 GPUs (2 nodes) keeps their global batch of 640, and so their lr through
+  # optim.scaling_rule. change OFFICIAL_EPOCH_LENGTH with the global batch
+  batch_size_per_gpu: 80
+  dataset_path: REQUIRED_ON_COMMAND_LINE  # (OmegaConf ??? would silently keep the default when merged)
+  OFFICIAL_EPOCH_LENGTH: 782  # ceil(500,428 frontal >= 518px training images / 640). RAD-DINO's 0 (auto) is fork-only
+  num_workers: 24
+  cxr_augmentation: true
+student:
+  arch: vit_base
+  patch_size: 14
+  block_chunks: 4
+  drop_path_rate: 0.30
+  pretrained_weights: REQUIRED_ON_COMMAND_LINE
+teacher:
+  warmup_teacher_temp_epochs: 50
+optim:
+  epochs: 100
+  warmup_epochs: 5
+  base_lr: 1.0e-03
+crops:
+  global_crops_size: 518
+  local_crops_size: 196
+  global_crops_scale:
+  - 0.50
+  - 1.00
+  local_crops_number: 8
+  local_crops_scale:
+  - 0.20
+  - 0.50
+evaluation:
+  # here this only saves a teacher checkpoint (RAD-DINO's 300 ran their linear probe), so every 5 epochs
+  eval_period_iterations: 3910

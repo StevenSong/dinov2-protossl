@@ -5,6 +5,7 @@
 
 from functools import partial
 import logging
+import random
 
 import torch
 from torch import nn
@@ -28,6 +29,13 @@ except ImportError:
 logger = logging.getLogger("dinov2")
 
 
+def _random_window(tokens, grid_size, window_size):
+    # (B, h * w, D) row-major tokens -> (B, wh * ww, D) tokens of one random wh x ww window, the same for every image
+    (h, w), (wh, ww) = grid_size, (min(window_size[0], grid_size[0]), min(window_size[1], grid_size[1]))
+    top, left = random.randint(0, h - wh), random.randint(0, w - ww)
+    return tokens.unflatten(1, (h, w))[:, top : top + wh, left : left + ww].flatten(1, 2)
+
+
 class SSLMetaArch(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -48,12 +56,22 @@ class SSLMetaArch(nn.Module):
             load_backbone_weights(student_backbone, cfg.student.pretrained_weights)
 
         self.embed_dim = embed_dim
-        self.dino_out_dim = cfg.dino.head_n_prototypes
+        self.do_proto = cfg.proto.enabled
+        self.dino_out_dim = cfg.proto.n_prototypes if self.do_proto else cfg.dino.head_n_prototypes
 
         self.do_dino = cfg.dino.loss_weight > 0
         self.do_koleo = cfg.dino.koleo_loss_weight > 0
         self.do_ibot = cfg.ibot.loss_weight > 0
         self.ibot_separate_head = cfg.ibot.separate_head
+
+        if self.do_proto:
+            # the prototype bank replaces both MLP heads, its own KoLeo replaces the CLS one
+            if not self.do_dino:
+                raise ValueError("proto.enabled needs the DINO loss (dino.loss_weight > 0)")
+            if self.ibot_separate_head:
+                raise ValueError("proto.enabled shares the prototype bank with iBOT, set ibot.separate_head=false")
+            if self.do_koleo:
+                raise ValueError("proto.enabled has its own KoLeo (proto.*), set dino.koleo_loss_weight=0")
 
         logger.info("OPTIONS -- DINO")
         if self.do_dino:
@@ -78,6 +96,24 @@ class SSLMetaArch(nn.Module):
         else:
             logger.info("OPTIONS -- DINO -- not using DINO")
 
+        if self.do_proto:
+            # imported here so dinov2 doesn't require protossl_rad unless the prototype head is used
+            from dinov2.layers.prototype_head import PrototypeHead
+
+            logger.info(f"OPTIONS -- PROTO -- {dict(cfg.proto)}")
+            self.proto_koleo_loss_weight = (
+                cfg.dino.loss_weight if cfg.proto.koleo_loss_weight is None else cfg.proto.koleo_loss_weight
+            )
+            self.proto_coherence_loss_weight = cfg.proto.coherence_loss_weight
+            dino_head = partial(
+                PrototypeHead,
+                n_prototypes=cfg.proto.n_prototypes,
+                n_subprototypes=cfg.proto.n_subprototypes,
+                dim=embed_dim,
+                radius=cfg.proto.radius,
+                chunk_size=cfg.proto.chunk_size,
+            )
+
         if self.do_dino or self.do_ibot:
             student_model_dict["dino_head"] = dino_head()
             teacher_model_dict["dino_head"] = dino_head()
@@ -90,7 +126,7 @@ class SSLMetaArch(nn.Module):
             self.ibot_loss_weight = cfg.ibot.loss_weight
             assert max(cfg.ibot.mask_ratio_min_max) > 0, "please provide a positive mask ratio tuple for ibot"
             assert cfg.ibot.mask_sample_probability > 0, "please provide a positive mask probability for ibot"
-            self.ibot_out_dim = cfg.ibot.head_n_prototypes if self.ibot_separate_head else cfg.dino.head_n_prototypes
+            self.ibot_out_dim = cfg.ibot.head_n_prototypes if self.ibot_separate_head else self.dino_out_dim
             self.ibot_patch_loss = iBOTPatchLoss(self.ibot_out_dim)
             if self.ibot_separate_head:
                 logger.info(f"OPTIONS -- IBOT -- loss_weight: {cfg.ibot.loss_weight}")
@@ -129,7 +165,57 @@ class SSLMetaArch(nn.Module):
         else:
             loss.backward()
 
+    @torch.no_grad()
+    def teacher_targets(
+        self,
+        teacher_cls_tokens_after_head,
+        masked_teacher_patch_tokens_after_head,
+        *,
+        n_global_crops,
+        n_masked_patches,
+        n_masked_patches_tensor,
+        teacher_temp,
+    ):
+        """
+        centered and sharpened (or Sinkhorn-Knopp) teacher outputs: DINO targets (n_global_crops, B, out_dim) and iBOT
+        targets for the masked patches (None if masked_teacher_patch_tokens_after_head is None)
+        """
+        do_ibot = masked_teacher_patch_tokens_after_head is not None
+        masked_teacher_ibot_softmaxed_centered = None
+        if self.cfg.train.centering == "centering":
+            teacher_dino_softmaxed_centered_list = self.dino_loss.softmax_center_teacher(
+                teacher_cls_tokens_after_head, teacher_temp=teacher_temp
+            ).view(n_global_crops, -1, *teacher_cls_tokens_after_head.shape[1:])
+            self.dino_loss.update_center(teacher_cls_tokens_after_head)
+            if do_ibot:
+                masked_teacher_patch_tokens_after_head = masked_teacher_patch_tokens_after_head.unsqueeze(0)
+                masked_teacher_ibot_softmaxed_centered = self.ibot_patch_loss.softmax_center_teacher(
+                    masked_teacher_patch_tokens_after_head[:, :n_masked_patches], teacher_temp=teacher_temp
+                )
+                masked_teacher_ibot_softmaxed_centered = masked_teacher_ibot_softmaxed_centered.squeeze(0)
+                self.ibot_patch_loss.update_center(masked_teacher_patch_tokens_after_head[:n_masked_patches])
+
+        elif self.cfg.train.centering == "sinkhorn_knopp":
+            teacher_dino_softmaxed_centered_list = self.dino_loss.sinkhorn_knopp_teacher(
+                teacher_cls_tokens_after_head, teacher_temp=teacher_temp
+            ).view(n_global_crops, -1, *teacher_cls_tokens_after_head.shape[1:])
+
+            if do_ibot:
+                masked_teacher_ibot_softmaxed_centered = self.ibot_patch_loss.sinkhorn_knopp_teacher(
+                    masked_teacher_patch_tokens_after_head,
+                    teacher_temp=teacher_temp,
+                    n_masked_patches_tensor=n_masked_patches_tensor,
+                )
+
+        else:
+            raise NotImplementedError
+
+        return teacher_dino_softmaxed_centered_list, masked_teacher_ibot_softmaxed_centered
+
     def forward_backward(self, images, teacher_temp):
+        if self.do_proto:
+            return self.forward_backward_proto(images, teacher_temp)
+
         n_global_crops = 2
         assert n_global_crops == 2
         n_local_crops = self.cfg.crops.local_crops_number
@@ -194,37 +280,16 @@ class SSLMetaArch(nn.Module):
                 ]
             else:
                 teacher_cls_tokens_after_head = self.teacher.dino_head(teacher_cls_tokens)
-                masked_teacher_ibot_softmaxed_centered = None
+                masked_teacher_patch_tokens_after_head = None
 
-            if self.cfg.train.centering == "centering":
-                teacher_dino_softmaxed_centered_list = self.dino_loss.softmax_center_teacher(
-                    teacher_cls_tokens_after_head, teacher_temp=teacher_temp
-                ).view(n_global_crops_teacher, -1, *teacher_cls_tokens_after_head.shape[1:])
-                self.dino_loss.update_center(teacher_cls_tokens_after_head)
-                if do_ibot:
-                    masked_teacher_patch_tokens_after_head = masked_teacher_patch_tokens_after_head.unsqueeze(0)
-                    masked_teacher_ibot_softmaxed_centered = self.ibot_patch_loss.softmax_center_teacher(
-                        masked_teacher_patch_tokens_after_head[:, :n_masked_patches], teacher_temp=teacher_temp
-                    )
-                    masked_teacher_ibot_softmaxed_centered = masked_teacher_ibot_softmaxed_centered.squeeze(0)
-                    self.ibot_patch_loss.update_center(masked_teacher_patch_tokens_after_head[:n_masked_patches])
-
-            elif self.cfg.train.centering == "sinkhorn_knopp":
-                teacher_dino_softmaxed_centered_list = self.dino_loss.sinkhorn_knopp_teacher(
-                    teacher_cls_tokens_after_head, teacher_temp=teacher_temp
-                ).view(n_global_crops_teacher, -1, *teacher_cls_tokens_after_head.shape[1:])
-
-                if do_ibot:
-                    masked_teacher_ibot_softmaxed_centered = self.ibot_patch_loss.sinkhorn_knopp_teacher(
-                        masked_teacher_patch_tokens_after_head,
-                        teacher_temp=teacher_temp,
-                        n_masked_patches_tensor=n_masked_patches_tensor,
-                    )
-
-            else:
-                raise NotImplementedError
-
-            return teacher_dino_softmaxed_centered_list, masked_teacher_ibot_softmaxed_centered
+            return self.teacher_targets(
+                teacher_cls_tokens_after_head,
+                masked_teacher_patch_tokens_after_head,
+                n_global_crops=n_global_crops_teacher,
+                n_masked_patches=n_masked_patches,
+                n_masked_patches_tensor=n_masked_patches_tensor,
+                teacher_temp=teacher_temp,
+            )
 
         teacher_dino_softmaxed_centered_list, masked_teacher_ibot_softmaxed_centered = get_teacher_output()
         reshard_fsdp_model(self.teacher)
@@ -337,6 +402,141 @@ class SSLMetaArch(nn.Module):
             loss_dict["ibot_loss"] = ibot_patch_loss / 2
 
             # accumulate loss
+            loss_accumulator += self.ibot_loss_weight * ibot_patch_loss
+
+        self.backprop_loss(loss_accumulator)
+
+        self.fsdp_synchronize_streams()
+
+        return loss_dict
+
+    def forward_backward_proto(self, images, teacher_temp):
+        """
+        forward_backward with the prototype head: image-level greedy activations of the CLS-subtracted patch tokens
+        take the place of the DINO head outputs on CLS tokens, and activations anchored at each masked patch the place
+        of the iBOT head outputs on masked patch tokens. loss terms, scales and centering are as in forward_backward.
+        keys starting with "diag_" are diagnostics, not losses
+        """
+        from protossl_rad.prototypes import subtract_cls
+
+        n_global_crops = 2
+        n_local_crops = self.cfg.crops.local_crops_number
+        do_ibot = self.do_ibot
+        device = next(self.student.parameters()).device
+
+        global_crops = images["collated_global_crops"].to(device, non_blocking=True)
+        local_crops = images["collated_local_crops"].to(device, non_blocking=True)
+        masks = images["collated_masks"].to(device, non_blocking=True)
+        mask_indices_list = images["mask_indices_list"].to(device, non_blocking=True)
+        n_masked_patches_tensor = images["n_masked_patches"].to(device, non_blocking=True)
+        n_masked_patches = mask_indices_list.shape[0]
+        masks_weight = images["masks_weight"].to(device, non_blocking=True)
+
+        n_local_crops_loss_terms = max(n_local_crops * n_global_crops, 1)
+        n_global_crops_loss_terms = (n_global_crops - 1) * n_global_crops
+        loss_scales = 2  # global crops are processed together
+        ibot_loss_scale = 1.0 / n_global_crops
+
+        patch_size = self.cfg.student.patch_size
+        global_grid = (global_crops.shape[-2] // patch_size, global_crops.shape[-1] // patch_size)
+        local_grid = (local_crops.shape[-2] // patch_size, local_crops.shape[-1] // patch_size)
+        # masked patch i of global crop row r is the anchor on both sides; teacher and student each pick their own
+        # anchor subprototype and greedy chain there
+        n_patches = global_grid[0] * global_grid[1]
+        ibot_rows, ibot_anchors = mask_indices_list // n_patches, mask_indices_list % n_patches
+
+        loss_dict = {}
+
+        # teacher
+        with torch.no_grad():
+            teacher_out = self.teacher.backbone(global_crops, is_training=True)
+            teacher_tokens = subtract_cls(teacher_out["x_norm_clstoken"], teacher_out["x_norm_patchtokens"])
+            image_queries = {"global": (teacher_tokens, global_grid)}
+            if n_local_crops > 0:
+                # max-pool bias diagnostic: the same teacher tokens, matched on a local-crop-sized window only
+                image_queries["window"] = (_random_window(teacher_tokens, global_grid, local_grid), local_grid)
+            patch_queries = {"ibot": (teacher_tokens, global_grid, ibot_rows, ibot_anchors, None)} if do_ibot else None
+            teacher_head_out = self.teacher.dino_head(image_queries, patch_queries)
+            # chunked and cat'd in reverse so A is matched to B in the global crops dino loss
+            teacher_global = teacher_head_out["global"].chunk(n_global_crops)
+            teacher_dino_softmaxed_centered_list, masked_teacher_ibot_softmaxed_centered = self.teacher_targets(
+                torch.cat((teacher_global[1], teacher_global[0])),
+                teacher_head_out.get("ibot"),
+                n_global_crops=n_global_crops,
+                n_masked_patches=n_masked_patches,
+                n_masked_patches_tensor=n_masked_patches_tensor,
+                teacher_temp=teacher_temp,
+            )
+            if n_local_crops > 0:
+                gap = teacher_head_out["global"] - teacher_head_out["window"]  # (2B, P)
+                loss_dict["diag_window_gap_mean"] = gap.float().mean()
+                loss_dict["diag_window_gap_std"] = gap.float().std(dim=-1).mean()  # softmax ignores a uniform shift
+            target_mean = teacher_dino_softmaxed_centered_list.flatten(0, 1).float().mean(dim=0)
+            loss_dict["diag_teacher_perplexity"] = torch.special.entr(target_mean).sum().exp()
+        reshard_fsdp_model(self.teacher)
+
+        # student
+        loss_accumulator = 0  # for backprop
+        student_global_out, student_local_out = self.student.backbone(
+            [global_crops, local_crops], masks=[masks, None], is_training=True
+        )
+        # mask tokens of the masked global crops are matched too
+        student_global_tokens = subtract_cls(
+            student_global_out["x_norm_clstoken"], student_global_out["x_norm_patchtokens"]
+        )
+        image_queries = {"global": (student_global_tokens, global_grid)}
+        if n_local_crops > 0:
+            student_local_tokens = subtract_cls(
+                student_local_out["x_norm_clstoken"], student_local_out["x_norm_patchtokens"]
+            )
+            image_queries["local"] = (student_local_tokens, local_grid)
+        # subprototype terms landing on visible patches are searched but don't get gradient
+        patch_queries = None
+        if do_ibot:
+            patch_queries = {"ibot": (student_global_tokens, global_grid, ibot_rows, ibot_anchors, masks)}
+        student_head_out = self.student.dino_head(
+            image_queries, patch_queries, regularize=True, coherence_margin=self.cfg.proto.coherence_margin
+        )
+
+        if n_local_crops > 0:
+            dino_local_crops_loss = self.dino_loss(
+                student_output_list=student_head_out["local"].chunk(n_local_crops),
+                teacher_out_softmaxed_centered_list=teacher_dino_softmaxed_centered_list,
+            ) / (n_global_crops_loss_terms + n_local_crops_loss_terms)
+            loss_dict["dino_local_crops_loss"] = dino_local_crops_loss
+            loss_accumulator += self.dino_loss_weight * dino_local_crops_loss
+
+        dino_global_crops_loss = (
+            self.dino_loss(
+                student_output_list=[student_head_out["global"]],
+                teacher_out_softmaxed_centered_list=[teacher_dino_softmaxed_centered_list.flatten(0, 1)],
+            )
+            * loss_scales
+            / (n_global_crops_loss_terms + n_local_crops_loss_terms)
+        )
+        loss_dict["dino_global_crops_loss"] = dino_global_crops_loss
+        loss_accumulator += self.dino_loss_weight * dino_global_crops_loss
+
+        koleo_loss = self.proto_koleo_loss_weight * student_head_out["koleo"]
+        coherence_loss = self.proto_coherence_loss_weight * student_head_out["coherence"]
+        loss_dict["koleo_loss"] = koleo_loss
+        loss_dict["coherence_loss"] = coherence_loss
+        loss_accumulator += koleo_loss + coherence_loss
+        loss_dict.update({f"diag_{k}": v for k, v in student_head_out.items() if k.startswith("bank_")})
+
+        if do_ibot:
+            ibot_patch_loss = (
+                self.ibot_patch_loss.forward_masked(
+                    student_head_out["ibot"],
+                    masked_teacher_ibot_softmaxed_centered,
+                    student_masks_flat=masks,
+                    n_masked_patches=n_masked_patches,
+                    masks_weight=masks_weight,
+                )
+                * loss_scales
+                * ibot_loss_scale
+            )
+            loss_dict["ibot_loss"] = ibot_patch_loss / 2
             loss_accumulator += self.ibot_loss_weight * ibot_patch_loss
 
         self.backprop_loss(loss_accumulator)

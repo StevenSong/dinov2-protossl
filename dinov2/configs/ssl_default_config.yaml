@@ -58,6 +58,16 @@ ibot:
   head_bottleneck_dim: 256
   head_nlayers: 3
   head_hidden_dim: 2048
+proto:
+  # ProtoSSL: a ProtoViT prototype bank (on CLS-subtracted patch tokens) replaces the DINO and iBOT heads
+  enabled: false
+  n_prototypes: 2048
+  n_subprototypes: 4
+  radius: 1
+  chunk_size: 256  # prototypes matched at once, bounds the (B, N, chunk, K) similarity tensor; null = all
+  koleo_loss_weight: null  # KoLeo over subprototypes (neighbors from other prototypes only); null = dino.loss_weight
+  coherence_loss_weight: 3.0e-3  # ProtoViT default, on the loss summed over prototypes
+  coherence_margin: 0.0
 train:
   batch_size_per_gpu: 64
   dataset_path: ImageNet:split=TRAIN
