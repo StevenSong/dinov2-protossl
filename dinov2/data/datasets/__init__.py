@@ -10,3 +10,4 @@ from .cell_dino.hpafov import HPAFoV
 from .cell_dino.chammi_cp import CHAMMI_CP
 from .cell_dino.chammi_hpa import CHAMMI_HPA
 from .cell_dino.chammi_wtc import CHAMMI_WTC
+from .cxr import CXRPretrain

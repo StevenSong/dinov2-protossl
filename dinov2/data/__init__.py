@@ -9,4 +9,5 @@ from .collate import collate_data_and_cast
 from .masking import MaskingGenerator
 from .augmentations import DataAugmentationDINO
 from .cell_dino.augmentations import CellAugmentationDINO
+from .cxr.augmentations import CXRAugmentationDINO
 from .accumulators import NoOpAccumulator, ResultsAccumulator

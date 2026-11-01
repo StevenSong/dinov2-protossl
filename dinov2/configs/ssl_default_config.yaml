@@ -69,6 +69,7 @@ train:
   cache_dataset: true
   centering: "centering" # or "sinkhorn_knopp"
   cell_augmentation: false
+  cxr_augmentation: false
 student:
   arch: vit_large
   patch_size: 16

@@ -1,0 +1,36 @@
+# environment for ProtoSSL-CXR experiments (the upstream conda.yaml relies on the retired pytorch conda channel)
+# create with: conda env create -p ~/miniforge3/envs/dinov2-protossl -f conda-protossl.yaml
+# torch/xformers are pinned to the CUDA 12.8 builds used in the ProtoSSL repo
+name: dinov2-protossl
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - --extra-index-url https://download.pytorch.org/whl/cu128
+    - torch==2.7.0
+    - torchvision==0.22.0
+    - xformers==0.0.30
+    # dinov2
+    - omegaconf
+    - fvcore
+    - iopath
+    - submitit
+    - torchmetrics==0.10.3
+    - setuptools<81  # torchmetrics 0.10.3 imports pkg_resources
+    # cxr datasets
+    - numpy
+    - pandas
+    - pillow
+    - pyarrow
+    - tqdm
+    - pydicom
+    - pylibjpeg
+    - pylibjpeg-openjpeg  # vindr-cxr test set is JPEG2000
+    # weight export / interop
+    - safetensors
+    - timm
+    - transformers
+    # dev
+    - pytest

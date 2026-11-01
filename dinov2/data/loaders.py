@@ -10,7 +10,7 @@ from typing import Any, Callable, List, Optional, TypeVar
 import torch
 from torch.utils.data import Sampler
 
-from .datasets import ImageNet, ImageNet22k, HPAone, HPAFoV, CHAMMI_CP, CHAMMI_HPA, CHAMMI_WTC
+from .datasets import ImageNet, ImageNet22k, HPAone, HPAFoV, CHAMMI_CP, CHAMMI_HPA, CHAMMI_WTC, CXRPretrain
 from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
 
 
@@ -49,7 +49,8 @@ def _parse_dataset_str(dataset_str: str):
 
     for token in tokens[1:]:
         key, value = token.split("=")
-        assert key in ("root", "extra", "split", "mode", "wildcard")
+        # CXRPretrain takes one <dataset name>=<dataset root> token per source dataset
+        assert key in ("root", "extra", "split", "mode", "wildcard") or name == "CXRPretrain"
         kwargs[key] = value
 
     if name == "ImageNet":
@@ -68,6 +69,8 @@ def _parse_dataset_str(dataset_str: str):
         class_ = CHAMMI_WTC
     elif name == "CHAMMI_HPA":
         class_ = CHAMMI_HPA
+    elif name == "CXRPretrain":
+        class_ = CXRPretrain
     else:
         raise ValueError(f'Unsupported dataset "{name}"')
 
