@@ -6,6 +6,7 @@
 import logging
 import os
 import random
+import re
 import subprocess
 from urllib.parse import urlparse
 
@@ -35,6 +36,24 @@ def load_pretrained_weights(model, pretrained_weights, checkpoint_key):
     state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items()}
     msg = model.load_state_dict(state_dict, strict=False)
     logger.info("Pretrained weights found at {} and loaded with msg: {}".format(pretrained_weights, msg))
+
+
+def _flat_block_key(key):
+    # blocks.{chunk}.{i}.* (block_chunks > 0) -> blocks.{i}.*; flat keys are unchanged
+    return re.sub(r"^blocks\.\d+\.(\d+)\.", r"blocks.\1.", key)
+
+
+def load_backbone_weights(model, path):
+    """
+    Strictly load a backbone-only state dict (e.g. the released dinov2_vitb14_pretrain.pth) into a
+    DinoVisionTransformer. Block keys are remapped between flat and chunked layouts, so the checkpoint and
+    the model may use different block_chunks. Any missing/unexpected key or shape mismatch raises.
+    """
+    state_dict = torch.load(path, map_location="cpu", weights_only=True)
+    flat_to_model = {_flat_block_key(k): k for k in model.state_dict()}
+    state_dict = {flat_to_model.get(_flat_block_key(k), k): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict, strict=True)
+    logger.info(f"Loaded backbone weights from {path}")
 
 
 def fix_random_seeds(seed=31):
