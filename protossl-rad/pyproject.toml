@@ -12,6 +12,7 @@ dependencies = ["torch", "numpy", "pandas", "pillow", "tqdm"]
 
 [project.optional-dependencies]
 dicom = ["pydicom", "pylibjpeg", "pylibjpeg-openjpeg"]
+test = ["pytest"]
 
 [tool.setuptools.packages.find]
 include = ["protossl_rad*"]
