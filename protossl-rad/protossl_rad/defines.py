@@ -17,6 +17,8 @@ UNKNOWN_LABEL = -1
 CACHE_SHORT_EDGE = 518
 # bump when the cached image preprocessing changes so stale caches aren't reused
 CACHE_VERSION = 1
+# bump when the parsed metadata tables change (e.g. new columns) so stale tables aren't reused
+METADATA_VERSION = 2
 
 # from microsoft/rad-dino preprocessor_config.json, grayscale replicated to 3 channels
 RAD_DINO_MEAN = (0.5307, 0.5307, 0.5307)

@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from ...defines import SPLIT_T, VIEW_T
-from .._utils import load_cached_metadata
+from .._utils import load_cached_metadata, read_image_sizes
 from ._base_cxr_dataset import BaseCXRDataset
 
 SPLIT_MAPPING = {"train": "train", "valid": "val", "test": "test"}
@@ -36,7 +36,13 @@ def get_rexgradient_metadata(dataset_path: str) -> pd.DataFrame:
                             "rel_path": rel_path,
                         }
                     )
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        # the json's ImageShape is the original DICOM size, the deid PNGs are downsampled so read their headers
+        df["width"], df["height"] = read_image_sizes(
+            [os.path.join(dataset_path, p) for p in df["rel_path"]],
+            desc="Reading rexgradient image sizes",
+        )
+        return df
 
     return load_cached_metadata(name="rexgradient", build_fn=build_fn, source_files=source_files)
 
@@ -50,6 +56,7 @@ class RexGradientDataset(BaseCXRDataset):
         dataset_path: str,
         split: SPLIT_T,
         views: Sequence[VIEW_T] | None = None,
+        min_short_edge: int | None = None,
         transform: Callable | None = None,
         as_rgb: bool = True,
         use_cache: bool = True,
@@ -63,6 +70,7 @@ class RexGradientDataset(BaseCXRDataset):
             dataset_path=dataset_path,
             split=split,
             views=views,
+            min_short_edge=min_short_edge,
             transform=transform,
             as_rgb=as_rgb,
             use_cache=use_cache,

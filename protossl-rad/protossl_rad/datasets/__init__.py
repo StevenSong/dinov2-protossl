@@ -7,4 +7,4 @@ from ._image_cache import (
     get_cache_root,
     load_cached_images,
 )
-from ._utils import load_cached_metadata, validate_label_subset
+from ._utils import load_cached_metadata, read_image_sizes, validate_label_subset

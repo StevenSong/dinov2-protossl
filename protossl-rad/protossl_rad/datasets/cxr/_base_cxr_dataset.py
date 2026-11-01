@@ -12,6 +12,8 @@ from ._cxr_image_io import read_cxr_image
 
 # columns every dataset's per-image metadata must have before calling `_setup`
 REQUIRED_COLUMNS = ["image_id", "patient_id", "study_id", "split", "view_raw", "rel_path"]
+# optional source image size columns (pixels, before cache downsampling), needed to filter by `min_short_edge`
+SIZE_COLUMNS = ["width", "height"]
 
 
 class BaseCXRDataset(Dataset, ABC):
@@ -29,6 +31,7 @@ class BaseCXRDataset(Dataset, ABC):
         dataset_path: str,
         split: SPLIT_T,
         views: Sequence[VIEW_T] | None = None,
+        min_short_edge: int | None = None,
         transform: Callable | None = None,
         as_rgb: bool = True,
         use_cache: bool = True,
@@ -38,6 +41,7 @@ class BaseCXRDataset(Dataset, ABC):
         :param dataset_path: path to the source dataset directory
         :param split: one of `"train"`, `"val"`, or `"test"`
         :param views: optional subset of canonical views (`"frontal"`, `"lateral"`, `"other"`) to keep
+        :param min_short_edge: optionally drop images whose source short edge is smaller than this many pixels
         :param transform: optional transform applied to the PIL image
         :param as_rgb: replicate the grayscale image to 3 channels before `transform`
         :param use_cache: read preprocessed images from the cache, otherwise read from source on the fly
@@ -52,6 +56,7 @@ class BaseCXRDataset(Dataset, ABC):
         dataset_path: str,
         split: SPLIT_T,
         views: Sequence[VIEW_T] | None,
+        min_short_edge: int | None,
         transform: Callable | None,
         as_rgb: bool,
         use_cache: bool,
@@ -71,10 +76,17 @@ class BaseCXRDataset(Dataset, ABC):
         full_df["sample_id"] = np.arange(len(full_df))
         full_df["source_id"] = pd.factorize(full_df["patient_id"], sort=True)[0]
         full_df["view"] = full_df["view_raw"].map(canonical_view)
+        has_size = set(SIZE_COLUMNS) <= set(full_df.columns)
+        if has_size:
+            full_df[SIZE_COLUMNS] = full_df[SIZE_COLUMNS].astype(int)
 
         mask = full_df["split"] == split
         if views is not None:
             mask &= full_df["view"].isin(views)
+        if min_short_edge is not None:
+            if not has_size:
+                raise ValueError(f"{self.name} metadata has no image sizes, can't filter by min_short_edge")
+            mask &= full_df[SIZE_COLUMNS].min(axis=1) >= min_short_edge
         df = full_df[mask].reset_index(drop=True)
         self._df = df
 
@@ -85,6 +97,7 @@ class BaseCXRDataset(Dataset, ABC):
         self.images = load_cached_images(
             name=self.name,
             dataset_path=dataset_path,
+            split=split,
             rel_paths=list(df["rel_path"]),
             reader=reader,
             use_cache=use_cache,

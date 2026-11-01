@@ -107,6 +107,7 @@ def load_cached_images(
     *,  # enforce kwargs
     name: str,
     dataset_path: str,
+    split: str,
     rel_paths: Sequence[str],
     reader: SourceReader,
     use_cache: bool = True,
@@ -115,7 +116,7 @@ def load_cached_images(
 ) -> CachedImages:
     src_paths = [os.path.join(dataset_path, p) for p in rel_paths]
     print("================load_cached_images=================")
-    print(f"Dataset parameters: ({name}, {dataset_path}, {len(rel_paths)} images)")
+    print(f"Dataset parameters: ({name}, {dataset_path}, {split}, {len(rel_paths)} images)")
     if not use_cache:
         print("Not using cache, images will be read and preprocessed from source on the fly")
         print("===================================================")
@@ -141,9 +142,13 @@ def load_cached_images(
                 reader=reader,
                 num_workers=num_workers or max(1, (os.cpu_count() or 2) // 2),
             )
-        os.makedirs(root, exist_ok=True)
-        with open(marker, "w") as f:
-            f.write(f"{len(cache_paths)}\n")
+        # the marker only speeds up later inits, so a read-only cache (e.g. a shared mount) is fine
+        try:
+            os.makedirs(root, exist_ok=True)
+            with open(marker, "w") as f:
+                f.write(f"{len(cache_paths)}\n")
+        except OSError as e:
+            print(f"Couldn't write cache marker ({e!r}), cache completeness will be rechecked on every init")
     print(f"Using cached images under {root}")
     print("===================================================")
     return CachedImages(src_paths=src_paths, cache_paths=cache_paths, reader=reader)

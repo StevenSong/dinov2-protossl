@@ -13,7 +13,8 @@ class CXRPretrain(Dataset):
     Union of the chest X-ray pretraining datasets from the protossl_rad package. Each source dataset is
     given as a <dataset name>=<full path to dataset root> token, and exactly those datasets are used, e.g.
         CXRPretrain:split=train:mimic-cxr=/path/to/mimic-cxr:chexpertplus=/path/to/chexpertplus
-    where names are from protossl_rad.datasets.cxr.PRETRAIN_DATASETS. The cache is under PROTOSSL_RAD_CACHE_DIR.
+    where names are from protossl_rad.datasets.cxr.PRETRAIN_DATASETS. Uses the pretraining defaults of
+    make_pretrain_dataset (frontal views only, source short edge >= 518px). The cache is under PROTOSSL_RAD_CACHE_DIR.
     """
 
     def __init__(

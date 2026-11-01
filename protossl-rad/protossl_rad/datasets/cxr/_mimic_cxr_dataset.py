@@ -18,6 +18,7 @@ class MimicCXRDataset(BaseCXRDataset):
         dataset_path: str,
         split: SPLIT_T,
         views: Sequence[VIEW_T] | None = None,
+        min_short_edge: int | None = None,
         transform: Callable | None = None,
         as_rgb: bool = True,
         use_cache: bool = True,
@@ -27,7 +28,7 @@ class MimicCXRDataset(BaseCXRDataset):
         df = pd.read_csv(_path / "mimic-cxr-2.0.0-split.csv", dtype=str)
         meta = pd.read_csv(
             _path / "mimic-cxr-2.0.0-metadata.csv",
-            usecols=["dicom_id", "ViewPosition"],
+            usecols=["dicom_id", "ViewPosition", "Rows", "Columns"],
             dtype=str,
         )
         df = df.merge(meta, on="dicom_id", how="left", validate="one_to_one")
@@ -36,6 +37,9 @@ class MimicCXRDataset(BaseCXRDataset):
                 "dicom_id": "image_id",
                 "subject_id": "patient_id",
                 "ViewPosition": "view_raw",
+                # the JPGs keep the DICOM resolution
+                "Rows": "height",
+                "Columns": "width",
             }
         )
         df["split"] = df["split"].map(SPLIT_MAPPING)
@@ -58,6 +62,7 @@ class MimicCXRDataset(BaseCXRDataset):
             dataset_path=dataset_path,
             split=split,
             views=views,
+            min_short_edge=min_short_edge,
             transform=transform,
             as_rgb=as_rgb,
             use_cache=use_cache,
